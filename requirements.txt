@@ -1,0 +1,5 @@
+opensearch-py
+openai>=1.0.0
+gradio
+python-dotenv
+tqdm
