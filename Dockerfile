@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 7860
 
-CMD ["bash", "start.sh"]
+CMD ["sh", "-c", "python import_to_opensearch.py && python rag_app.py"]
