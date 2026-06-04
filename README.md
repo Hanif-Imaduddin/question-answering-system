@@ -74,14 +74,7 @@ OPENSEARCH_USE_SSL=true
 PORT=7860
 ```
 
-Catatan:
-
-- Jangan commit file `.env`.
-- Pastikan `EMBEDDING_MODEL` menghasilkan dimensi vector yang sama dengan `VECTOR_DIM` di script, yaitu `768`.
-
 ## Cara Menjalankan dengan Docker
-
-Cara ini paling praktis untuk demo karena OpenSearch dan aplikasi dijalankan bersama.
 
 ### 1. Siapkan `.env`
 
@@ -131,82 +124,6 @@ Jika ingin menghapus data OpenSearch juga:
 docker compose down -v
 ```
 
-## Cara Menjalankan Lokal
-
-Cara lokal cocok jika ingin debugging script Python satu per satu. OpenSearch tetap paling mudah dijalankan via Docker.
-
-### 1. Jalankan OpenSearch saja
-
-```bash
-docker compose up opensearch
-```
-
-Tunggu sampai OpenSearch siap di:
-
-```text
-https://localhost:9200
-```
-
-Default user/password:
-
-```text
-admin / YourStrongPassword123!
-```
-
-### 2. Buat virtual environment
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-macOS/Linux:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 3. Siapkan `.env`
-
-```bash
-cp .env.example .env
-```
-
-Isi API token dan model.
-
-### 4. Import data ke OpenSearch
-
-Cara cepat, gunakan dump yang sudah ada:
-
-```bash
-python import_to_opensearch.py
-```
-
-Alternatif jika ingin membuat data dan embedding dari awal:
-
-```bash
-python generate_hospital_data.py
-python load_to_opensearch_with_embedding.py
-python export_opensearch.py
-```
-
-### 5. Jalankan aplikasi
-
-```bash
-python rag_app.py
-```
-
-Buka:
-
-```text
-http://localhost:7860
-```
-
 ## Alur Sistem
 
 1. User mengetik pertanyaan di GUI Gradio.
@@ -227,7 +144,5 @@ http://localhost:7860
 ## Contoh Pertanyaan
 
 - Siapa saja pasien yang termasuk kategori BPJS?
-- Dokter siapa yang bekerja di departemen Anak?
-- Berapa total biaya tagihan yang belum lunas?
-- Pasien siapa yang menjalani operasi oleh Tim Jantung?
-- Item tagihan apa saja yang ditanggung asuransi?
+- Siapa Dr. Devi Prayoga?
+- Apakah Chelsea Prayoga dan Dr. Devi Prayoga memiliki keterhubungan?
