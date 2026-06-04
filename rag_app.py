@@ -175,30 +175,28 @@ with gr.Blocks(title="RAG Rumah Sakit") as demo:
         "Database: OpenSearch"
     )
 
+    chatbot = gr.Chatbot(
+        label="Percakapan",
+        height=560,
+    )
     with gr.Row():
-        with gr.Column(scale=3):
-            chatbot = gr.Chatbot(
-                label="Percakapan",
-                height=520,
-            )
-            with gr.Row():
-                msg_box = gr.Textbox(
-                    placeholder="Ketik pertanyaan Anda...",
-                    show_label=False,
-                    scale=5,
-                    lines=1,
-                )
-                send_btn = gr.Button("Kirim", variant="primary", scale=1)
-            clear_btn = gr.Button("Hapus Percakapan", size="sm")
+        msg_box = gr.Textbox(
+            placeholder="Ketik pertanyaan Anda...",
+            show_label=False,
+            scale=5,
+            lines=1,
+        )
+        send_btn = gr.Button("Kirim", variant="primary", scale=1)
+    clear_btn = gr.Button("Hapus Percakapan", size="sm")
 
-        with gr.Column(scale=2):
-            ctx_box = gr.Textbox(
-                label="Konteks dari OpenSearch",
-                placeholder="Konteks akan muncul setelah pertanyaan dikirim.",
-                lines=30,
-                max_lines=35,
-                interactive=False,
-            )
+    with gr.Accordion("Konteks dari OpenSearch", open=False):
+        ctx_box = gr.Textbox(
+            label="Dokumen relevan hasil retrieval",
+            placeholder="Konteks akan muncul setelah pertanyaan dikirim.",
+            lines=16,
+            max_lines=20,
+            interactive=False,
+        )
 
     send_btn.click(
         respond,
