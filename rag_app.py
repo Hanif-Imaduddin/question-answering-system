@@ -4,7 +4,7 @@ RAG Question-Answering System — Hospital Data
 Requires: pip install gradio opensearch-py openai python-dotenv
 Run: python rag_app.py
 """
-
+#Trigger
 import os
 import gradio as gr
 from dotenv import load_dotenv
