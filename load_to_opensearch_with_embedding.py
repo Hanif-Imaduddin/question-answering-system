@@ -1,343 +1,327 @@
 """
-Load Data Rumah Sakit ke OpenSearch + Vector Embedding
-========================================================
-Instalasi:
-    pip install opensearch-py openai python-dotenv tqdm
+Load Diabetes Readmission Data ke OpenSearch + Vector Embedding
+===============================================================
+Dataset:
+    diabetic_data.csv
+    IDS_mapping.csv
 
-Model embedding yang dipakai:
-    Qwen/Qwen3-Embedding-8B via DeepInfra API
-    -> 4096 dimensi, support Bahasa Indonesia
+Konsep:
+    1 encounter = 1 dokumen OpenSearch
 
-Jalankan SETELAH generate_hospital_data.py:
+Jalankan:
     python load_to_opensearch_with_embedding.py
+
+Opsional:
+    DIABETES_LOAD_LIMIT=10000 python load_to_opensearch_with_embedding.py
+    Jika DIABETES_LOAD_LIMIT kosong/0, seluruh data akan diproses.
 """
 
-import json
+import csv
 import os
+from typing import Any
+
 from dotenv import load_dotenv
 from openai import OpenAI
 from opensearchpy import OpenSearch, helpers
-from tqdm import tqdm  # pip install tqdm  (progress bar)
+from tqdm import tqdm
 
 load_dotenv()
 
-# ----------------------------------------------
-# 1. Koneksi OpenSearch
-# ----------------------------------------------
+INDEX_NAME = "diabetes_encounters"
+VECTOR_DIM = 768
+DATA_PATH = os.getenv("DIABETES_DATA_PATH", "diabetic_data.csv")
+MAPPING_PATH = os.getenv("DIABETES_MAPPING_PATH", "IDS_mapping.csv")
+LOAD_LIMIT = int(os.getenv("DIABETES_LOAD_LIMIT", "0") or "0")
+BULK_CHUNK_SIZE = int(os.getenv("BULK_CHUNK_SIZE", "250"))
+
+
+def clean_value(value: Any, default: str = "Unknown") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if text in ("", "?"):
+        return default
+    return text
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except Exception:
+        return default
+
+
+def load_id_mappings(path: str) -> dict[str, dict[str, str]]:
+    sections = {
+        "admission_type_id": {},
+        "discharge_disposition_id": {},
+        "admission_source_id": {},
+    }
+    current_section = None
+
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row or not row[0].strip():
+                continue
+
+            key = row[0].strip()
+            if key in sections:
+                current_section = key
+                continue
+
+            if key == "description" or current_section is None:
+                continue
+
+            if len(row) >= 2:
+                sections[current_section][key] = clean_value(row[1], "Unknown")
+
+    return sections
+
+
+def diagnosis_group(code: str) -> str:
+    code = clean_value(code, "Unknown")
+    if code == "Unknown":
+        return "Unknown"
+    if code.startswith(("V", "E")):
+        return "Supplemental"
+
+    try:
+        num = float(code)
+    except Exception:
+        return "Other"
+
+    if 250 <= num < 251:
+        return "Diabetes"
+    if (390 <= num <= 459) or int(num) == 785:
+        return "Circulatory"
+    if (460 <= num <= 519) or int(num) == 786:
+        return "Respiratory"
+    if (520 <= num <= 579) or int(num) == 787:
+        return "Digestive"
+    if 580 <= num <= 629 or int(num) == 788:
+        return "Genitourinary"
+    if 140 <= num <= 239:
+        return "Neoplasms"
+    if 710 <= num <= 739:
+        return "Musculoskeletal"
+    if 800 <= num <= 999:
+        return "Injury"
+    return "Other"
+
+
+def build_document(row: dict[str, str], mappings: dict[str, dict[str, str]]) -> dict:
+    admission_type = mappings["admission_type_id"].get(row["admission_type_id"], "Unknown")
+    discharge_disposition = mappings["discharge_disposition_id"].get(
+        row["discharge_disposition_id"], "Unknown"
+    )
+    admission_source = mappings["admission_source_id"].get(row["admission_source_id"], "Unknown")
+
+    readmission_status = clean_value(row["readmitted"], "NO")
+    primary_group = diagnosis_group(row["diag_1"])
+    secondary_group = diagnosis_group(row["diag_2"])
+    tertiary_group = diagnosis_group(row["diag_3"])
+
+    number_inpatient = safe_int(row["number_inpatient"])
+    number_outpatient = safe_int(row["number_outpatient"])
+    number_emergency = safe_int(row["number_emergency"])
+    time_in_hospital = safe_int(row["time_in_hospital"])
+    num_medications = safe_int(row["num_medications"])
+
+    high_risk_flag = (
+        readmission_status == "<30"
+        or number_inpatient >= 2
+        or number_emergency >= 2
+        or time_in_hospital >= 7
+        or num_medications >= 20
+    )
+
+    patient_summary_text = (
+        f"Encounter {row['encounter_id']} pasien diabetes dengan gender "
+        f"{clean_value(row['gender'])}, ras {clean_value(row['race'])}, usia {clean_value(row['age'])}. "
+        f"Admission type: {admission_type}; admission source: {admission_source}; "
+        f"discharge disposition: {discharge_disposition}; medical specialty: "
+        f"{clean_value(row['medical_specialty'])}. Diagnosis utama {clean_value(row['diag_1'])} "
+        f"({primary_group}), diagnosis kedua {clean_value(row['diag_2'])} ({secondary_group}), "
+        f"diagnosis ketiga {clean_value(row['diag_3'])} ({tertiary_group}). "
+        f"Riwayat kunjungan outpatient {number_outpatient}, emergency {number_emergency}, "
+        f"inpatient {number_inpatient}. Lama rawat {time_in_hospital} hari, jumlah obat "
+        f"{num_medications}, medication change {clean_value(row['change'])}, diabetesMed "
+        f"{clean_value(row['diabetesMed'])}. Status readmission: {readmission_status}. "
+        f"High risk flag: {high_risk_flag}."
+    )
+
+    return {
+        "encounter_id": clean_value(row["encounter_id"]),
+        "patient_nbr": clean_value(row["patient_nbr"]),
+        "race": clean_value(row["race"]),
+        "gender": clean_value(row["gender"]),
+        "age": clean_value(row["age"]),
+        "weight": clean_value(row["weight"]),
+        "admission_type_id": safe_int(row["admission_type_id"]),
+        "admission_type": admission_type,
+        "discharge_disposition_id": safe_int(row["discharge_disposition_id"]),
+        "discharge_disposition": discharge_disposition,
+        "admission_source_id": safe_int(row["admission_source_id"]),
+        "admission_source": admission_source,
+        "time_in_hospital": time_in_hospital,
+        "payer_code": clean_value(row["payer_code"]),
+        "medical_specialty": clean_value(row["medical_specialty"]),
+        "num_lab_procedures": safe_int(row["num_lab_procedures"]),
+        "num_procedures": safe_int(row["num_procedures"]),
+        "num_medications": num_medications,
+        "number_outpatient": number_outpatient,
+        "number_emergency": number_emergency,
+        "number_inpatient": number_inpatient,
+        "diag_1": clean_value(row["diag_1"]),
+        "diag_2": clean_value(row["diag_2"]),
+        "diag_3": clean_value(row["diag_3"]),
+        "diagnosis_group": primary_group,
+        "diagnosis_group_2": secondary_group,
+        "diagnosis_group_3": tertiary_group,
+        "number_diagnoses": safe_int(row["number_diagnoses"]),
+        "max_glu_serum": clean_value(row["max_glu_serum"]),
+        "A1Cresult": clean_value(row["A1Cresult"]),
+        "change": clean_value(row["change"]),
+        "diabetesMed": clean_value(row["diabetesMed"]),
+        "readmitted": readmission_status,
+        "readmission_status": readmission_status,
+        "readmitted_binary": readmission_status in ("<30", ">30"),
+        "early_readmission_flag": readmission_status == "<30",
+        "high_risk_flag": high_risk_flag,
+        "patient_summary_text": patient_summary_text,
+    }
+
+
 client = OpenSearch(
-    hosts=[{"host": "localhost", "port": 9200}],
-    http_auth=("admin", "YourStrongPassword123!"),
-    use_ssl=True,
+    hosts=[{"host": os.getenv("OPENSEARCH_HOST", "localhost"), "port": int(os.getenv("OPENSEARCH_PORT", "9200"))}],
+    http_auth=(
+        os.getenv("OPENSEARCH_USER", "admin"),
+        os.getenv("OPENSEARCH_PASSWORD", "YourStrongPassword123!"),
+    ),
+    use_ssl=os.getenv("OPENSEARCH_USE_SSL", "true").lower() == "true",
     verify_certs=False,
     ssl_assert_hostname=False,
     ssl_show_warn=False,
 )
 print("Terhubung ke OpenSearch:", client.info()["version"]["number"])
 
-# ----------------------------------------------
-# 2. Setup embedding client (DeepInfra)
-# ----------------------------------------------
-DEEPINFRA_API_TOKEN = os.getenv("DEEPINFRA_API_TOKEN")
-DEEPINFRA_API_URL   = os.getenv("DEEPINFRA_API_URL")
-EMBEDDING_MODEL     = os.getenv("EMBEDDING_MODEL")
-
 embed_client = OpenAI(
-    api_key=DEEPINFRA_API_TOKEN,
-    base_url=DEEPINFRA_API_URL,
+    api_key=os.getenv("DEEPINFRA_API_TOKEN"),
+    base_url=os.getenv("DEEPINFRA_API_URL"),
 )
-VECTOR_DIM = 768  # dimensi output google/embeddinggemma-300m
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 print(f"Embedding model: {EMBEDDING_MODEL} ({VECTOR_DIM} dim)")
 
+
 def embed(text: str) -> list[float]:
-    """Ubah teks menjadi vector float via DeepInfra API."""
-    response = embed_client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=text,
-    )
+    response = embed_client.embeddings.create(model=EMBEDDING_MODEL, input=text)
     return response.data[0].embedding
 
-# ----------------------------------------------
-# 3. Load hospital_data.json
-# ----------------------------------------------
-with open("hospital_data.json", "r", encoding="utf-8") as f:
-    data = json.load(f)
 
-# ----------------------------------------------
-# 4. Fungsi bantu: buat index + bulk insert
-# ----------------------------------------------
-def recreate_index(index_name: str, mapping: dict):
-    if client.indices.exists(index=index_name):
-        client.indices.delete(index=index_name)
-        print(f"  Index lama '{index_name}' dihapus")
-    client.indices.create(index=index_name, body=mapping)
-    print(f"  Index '{index_name}' dibuat")
+def recreate_index():
+    if client.indices.exists(index=INDEX_NAME):
+        client.indices.delete(index=INDEX_NAME)
+        print(f"Index lama '{INDEX_NAME}' dihapus")
 
-def bulk_insert(index_name: str, actions: list):
-    success, errors = helpers.bulk(client, actions, raise_on_error=False)
-    print(f"  {success} dokumen -> '{index_name}'")
-    if errors:
-        print(f"  {len(errors)} error:", errors[:2])
-
-# ----------------------------------------------------------------------
-# 5. Tiap index: definisikan teks yang akan di-embed, buat mapping,
-#    lalu generate vector per dokumen
-# ----------------------------------------------------------------------
-
-# -- 5a. DEPARTMENTS ---------------------------------------------------
-print("\n-- DEPARTMENTS --")
-recreate_index("departments", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "nama_departemen": {"type": "keyword"},
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["departments"], desc="  embed"):
-    text = f"Departemen rumah sakit: {rec['nama_departemen']}"
-    actions.append({
-        "_index": "departments",
-        "_id": rec["_id"],
-        "_source": {"nama_departemen": rec["nama_departemen"], "embedding": embed(text)},
-    })
-bulk_insert("departments", actions)
-
-# -- 5b. MEDICAL_TEAMS -------------------------------------------------
-print("\n-- MEDICAL_TEAMS --")
-recreate_index("medical_teams", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "nama_tim": {"type": "keyword"},
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["medical_teams"], desc="  embed"):
-    text = f"Tim medis: {rec['nama_tim']}"
-    actions.append({
-        "_index": "medical_teams",
-        "_id": rec["_id"],
-        "_source": {"nama_tim": rec["nama_tim"], "embedding": embed(text)},
-    })
-bulk_insert("medical_teams", actions)
-
-# -- 5c. DOCTORS -------------------------------------------------------
-print("\n-- DOCTORS --")
-
-# Buat lookup cepat untuk nama departemen & tim
-dept_lookup = {d["_id"]: d["nama_departemen"] for d in data["departments"]}
-team_lookup = {t["_id"]: t["nama_tim"] for t in data["medical_teams"]}
-
-recreate_index("doctors", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "nama_dokter":   {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-            "department_id": {"type": "integer"},
-            "team_id":       {"type": "integer"},
-            "nama_departemen": {"type": "keyword"},   # denormalized
-            "nama_tim":        {"type": "keyword"},   # denormalized
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["doctors"], desc="  embed"):
-    dept_name = dept_lookup.get(rec["department_id"], "")
-    team_name = team_lookup.get(rec["team_id"], "")
-    text = (f"Dokter bernama {rec['nama_dokter']} bekerja di departemen "
-            f"{dept_name} dan tergabung dalam {team_name}.")
-    actions.append({
-        "_index": "doctors",
-        "_id": rec["_id"],
-        "_source": {
-            "nama_dokter":     rec["nama_dokter"],
-            "department_id":   rec["department_id"],
-            "team_id":         rec["team_id"],
-            "nama_departemen": dept_name,
-            "nama_tim":        team_name,
-            "embedding":       embed(text),
+    mapping = {
+        "settings": {"index": {"knn": True}},
+        "mappings": {
+            "properties": {
+                "encounter_id": {"type": "keyword"},
+                "patient_nbr": {"type": "keyword"},
+                "race": {"type": "keyword"},
+                "gender": {"type": "keyword"},
+                "age": {"type": "keyword"},
+                "weight": {"type": "keyword"},
+                "admission_type_id": {"type": "integer"},
+                "admission_type": {"type": "keyword"},
+                "discharge_disposition_id": {"type": "integer"},
+                "discharge_disposition": {"type": "keyword"},
+                "admission_source_id": {"type": "integer"},
+                "admission_source": {"type": "keyword"},
+                "time_in_hospital": {"type": "integer"},
+                "payer_code": {"type": "keyword"},
+                "medical_specialty": {"type": "keyword"},
+                "num_lab_procedures": {"type": "integer"},
+                "num_procedures": {"type": "integer"},
+                "num_medications": {"type": "integer"},
+                "number_outpatient": {"type": "integer"},
+                "number_emergency": {"type": "integer"},
+                "number_inpatient": {"type": "integer"},
+                "diag_1": {"type": "keyword"},
+                "diag_2": {"type": "keyword"},
+                "diag_3": {"type": "keyword"},
+                "diagnosis_group": {"type": "keyword"},
+                "diagnosis_group_2": {"type": "keyword"},
+                "diagnosis_group_3": {"type": "keyword"},
+                "number_diagnoses": {"type": "integer"},
+                "max_glu_serum": {"type": "keyword"},
+                "A1Cresult": {"type": "keyword"},
+                "change": {"type": "keyword"},
+                "diabetesMed": {"type": "keyword"},
+                "readmitted": {"type": "keyword"},
+                "readmission_status": {"type": "keyword"},
+                "readmitted_binary": {"type": "boolean"},
+                "early_readmission_flag": {"type": "boolean"},
+                "high_risk_flag": {"type": "boolean"},
+                "patient_summary_text": {"type": "text"},
+                "embedding": {
+                    "type": "knn_vector",
+                    "dimension": VECTOR_DIM,
+                    "method": {
+                        "name": "hnsw",
+                        "space_type": "cosinesimil",
+                        "engine": "lucene",
+                    },
+                },
+            }
         },
-    })
-bulk_insert("doctors", actions)
+    }
+    client.indices.create(index=INDEX_NAME, body=mapping)
+    print(f"Index '{INDEX_NAME}' dibuat")
 
-# -- 5d. PATIENTS ------------------------------------------------------
-print("\n-- PATIENTS --")
-recreate_index("patients", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "nama_pasien": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-            "kategori":    {"type": "keyword"},
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["patients"], desc="  embed"):
-    text = f"Pasien bernama {rec['nama_pasien']} dengan kategori {rec['kategori']}."
-    actions.append({
-        "_index": "patients",
-        "_id": rec["_id"],
-        "_source": {
-            "nama_pasien": rec["nama_pasien"],
-            "kategori":    rec["kategori"],
-            "embedding":   embed(text),
-        },
-    })
-bulk_insert("patients", actions)
 
-# -- 5e. PATIENT_TREATMENTS --------------------------------------------
-print("\n-- PATIENT_TREATMENTS --")
+def iter_rows():
+    with open(DATA_PATH, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for i, row in enumerate(reader, 1):
+            if LOAD_LIMIT and i > LOAD_LIMIT:
+                break
+            yield row
 
-# Lookup nama pasien untuk denormalisasi
-patient_lookup = {p["_id"]: p for p in data["patients"]}
 
-recreate_index("patient_treatments", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "patient_id":      {"type": "integer"},
-            "team_id":         {"type": "integer"},
-            "tanggal_operasi": {"type": "date"},
-            "nama_pasien":     {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-            "nama_tim":        {"type": "keyword"},
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["patient_treatments"], desc="  embed"):
-    pasien  = patient_lookup.get(rec["patient_id"], {})
-    tim     = team_lookup.get(rec["team_id"], "")
-    text = (f"Pasien {pasien.get('nama_pasien','?')} menjalani operasi "
-            f"oleh {tim} pada tanggal {rec['tanggal_operasi']}.")
-    actions.append({
-        "_index": "patient_treatments",
-        "_id": rec["_id"],
-        "_source": {
-            "patient_id":      rec["patient_id"],
-            "team_id":         rec["team_id"],
-            "tanggal_operasi": rec["tanggal_operasi"],
-            "nama_pasien":     pasien.get("nama_pasien", ""),
-            "nama_tim":        tim,
-            "embedding":       embed(text),
-        },
-    })
-bulk_insert("patient_treatments", actions)
+def main():
+    mappings = load_id_mappings(MAPPING_PATH)
+    recreate_index()
 
-# -- 5f. BILLINGS ------------------------------------------------------
-print("\n-- BILLINGS --")
-recreate_index("billings", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "treatment_id":      {"type": "integer"},
-            "total_biaya":       {"type": "long"},
-            "metode_pembayaran": {"type": "keyword"},
-            "sub_metode":        {"type": "keyword"},
-            "status_pembayaran": {"type": "keyword"},
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["billings"], desc="  embed"):
-    text = (f"Tagihan sebesar Rp {rec['total_biaya']:,} dengan metode "
-            f"{rec['metode_pembayaran']} ({rec['sub_metode']}), "
-            f"status: {rec['status_pembayaran']}.")
-    actions.append({
-        "_index": "billings",
-        "_id": rec["_id"],
-        "_source": {
-            "treatment_id":      rec["treatment_id"],
-            "total_biaya":       rec["total_biaya"],
-            "metode_pembayaran": rec["metode_pembayaran"],
-            "sub_metode":        rec["sub_metode"],
-            "status_pembayaran": rec["status_pembayaran"],
-            "embedding":         embed(text),
-        },
-    })
-bulk_insert("billings", actions)
+    rows = list(iter_rows())
+    print(f"Memproses {len(rows)} encounter dari {DATA_PATH}")
 
-# -- 5g. BILLING_ITEMS -------------------------------------------------
-print("\n-- BILLING_ITEMS --")
-recreate_index("billing_items", {
-    "settings": {"index": {"knn": True}},
-    "mappings": {
-        "properties": {
-            "billing_id":              {"type": "integer"},
-            "deskripsi":               {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-            "biaya":                   {"type": "long"},
-            "is_covered_by_insurance": {"type": "integer"},
-            "embedding": {
-                "type": "knn_vector",
-                "dimension": VECTOR_DIM,
-                "method": {"name": "hnsw", "space_type": "cosinesimil",
-                           "engine": "lucene"},
-            },
-        }
-    },
-})
-actions = []
-for rec in tqdm(data["billing_items"], desc="  embed"):
-    covered = "ditanggung asuransi" if rec["is_covered_by_insurance"] else "tidak ditanggung asuransi"
-    text = (f"Item tagihan: {rec['deskripsi']}, biaya Rp {rec['biaya']:,}, "
-            f"{covered}.")
-    actions.append({
-        "_index": "billing_items",
-        "_id": rec["_id"],
-        "_source": {
-            "billing_id":              rec["billing_id"],
-            "deskripsi":               rec["deskripsi"],
-            "biaya":                   rec["biaya"],
-            "is_covered_by_insurance": rec["is_covered_by_insurance"],
-            "embedding":               embed(text),
-        },
-    })
-bulk_insert("billing_items", actions)
+    actions = []
+    for row in tqdm(rows, desc="Embedding encounter"):
+        doc = build_document(row, mappings)
+        doc["embedding"] = embed(doc["patient_summary_text"])
+        actions.append({
+            "_index": INDEX_NAME,
+            "_id": doc["encounter_id"],
+            "_source": doc,
+        })
 
-# ----------------------------------------------
-# 6. Verifikasi akhir
-# ----------------------------------------------
-print("\n-- VERIFIKASI --")
-for idx in ["departments","medical_teams","doctors","patients",
-            "patient_treatments","billings","billing_items"]:
-    count = client.count(index=idx)["count"]
-    print(f"  {idx:25s}: {count} dokumen")
+        if len(actions) >= BULK_CHUNK_SIZE:
+            success, errors = helpers.bulk(client, actions, raise_on_error=False)
+            if errors:
+                print(f"  {len(errors)} error bulk:", errors[:2])
+            actions.clear()
 
-print("\nSelesai! Semua data + embedding sudah masuk OpenSearch.")
+    if actions:
+        success, errors = helpers.bulk(client, actions, raise_on_error=False)
+        if errors:
+            print(f"  {len(errors)} error bulk:", errors[:2])
+
+    count = client.count(index=INDEX_NAME)["count"]
+    print(f"Selesai. Total dokumen di '{INDEX_NAME}': {count}")
+
+
+if __name__ == "__main__":
+    main()

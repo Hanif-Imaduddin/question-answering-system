@@ -1,28 +1,28 @@
 """
-Export semua indeks OpenSearch (termasuk embedding vectors) ke opensearch_dump.json.
-Jalankan SEKALI di lokal sebelum deploy ke Railway.
+Export index diabetes_encounters dari OpenSearch ke opensearch_dump.json.
+Jalankan setelah load_to_opensearch_with_embedding.py selesai.
 
-Usage: python export_opensearch.py
+Usage:
+    python export_opensearch.py
 """
 
 import json
 import os
+
+from dotenv import load_dotenv
 from opensearchpy import OpenSearch
 
-INDICES = [
-    "departments",
-    "medical_teams",
-    "doctors",
-    "patients",
-    "patient_treatments",
-    "billings",
-    "billing_items",
-]
+load_dotenv()
+
+INDICES = ["diabetes_encounters"]
 
 client = OpenSearch(
-    hosts=[{"host": "localhost", "port": 9200}],
-    http_auth=("admin", "YourStrongPassword123!"),
-    use_ssl=True,
+    hosts=[{"host": os.getenv("OPENSEARCH_HOST", "localhost"), "port": int(os.getenv("OPENSEARCH_PORT", "9200"))}],
+    http_auth=(
+        os.getenv("OPENSEARCH_USER", "admin"),
+        os.getenv("OPENSEARCH_PASSWORD", "YourStrongPassword123!"),
+    ),
+    use_ssl=os.getenv("OPENSEARCH_USE_SSL", "true").lower() == "true",
     verify_certs=False,
     ssl_assert_hostname=False,
     ssl_show_warn=False,
@@ -30,21 +30,18 @@ client = OpenSearch(
 
 print("Terhubung ke OpenSearch:", client.info()["version"]["number"])
 
-dump = {"version": "1.0", "indices": {}}
+dump = {"version": "2.0", "case": "diabetes_readmission", "indices": {}}
 
 for index in INDICES:
-    print(f"Mengekspor {index}...", end=" ", flush=True)
+    if not client.indices.exists(index=index):
+        raise SystemExit(f"Index '{index}' belum ada. Jalankan load_to_opensearch_with_embedding.py dulu.")
 
+    print(f"Mengekspor {index}...", end=" ", flush=True)
     mapping_resp = client.indices.get_mapping(index=index)
     mapping = mapping_resp[index]["mappings"]
 
     docs = []
-    resp = client.search(
-        index=index,
-        body={"query": {"match_all": {}}},
-        size=500,
-        scroll="5m",
-    )
+    resp = client.search(index=index, body={"query": {"match_all": {}}}, size=500, scroll="5m")
     scroll_id = resp["_scroll_id"]
     hits = resp["hits"]["hits"]
 
@@ -56,19 +53,12 @@ for index in INDICES:
         hits = resp["hits"]["hits"]
 
     client.clear_scroll(scroll_id=scroll_id)
-
-    dump["indices"][index] = {
-        "mapping": mapping,
-        "docs": docs,
-    }
+    dump["indices"][index] = {"mapping": mapping, "docs": docs}
     print(f"{len(docs)} dokumen")
 
-output_path = "opensearch_dump.json"
-print(f"\nMenyimpan ke {output_path}...", end=" ", flush=True)
+output_path = os.getenv("DUMP_PATH", "opensearch_dump.json")
 with open(output_path, "w", encoding="utf-8") as f:
     json.dump(dump, f, ensure_ascii=False)
-print("Selesai!")
 
 size_mb = os.path.getsize(output_path) / (1024 * 1024)
-print(f"Ukuran file: {size_mb:.1f} MB")
-print("\nSelanjutnya: deploy ke Railway lalu jalankan 'railway up'")
+print(f"Selesai menyimpan {output_path} ({size_mb:.1f} MB)")
