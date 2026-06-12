@@ -1,69 +1,97 @@
-# Question Answering System Rumah Sakit dengan OpenSearch
+# OpenSearch QA System untuk Analisis Readmission Pasien Diabetes
 
-Project ini adalah implementasi tugas akhir untuk membangun **Question Answering System** di atas **OpenSearch** sebagai vector database. Studi kasus yang digunakan adalah data Rumah Sakit Sehat Selalu.
+Project ini mengembangkan **Question Answering System berbasis OpenSearch** untuk analytic case:
 
-## Pilihan Pendekatan
+> Analisis Readmission Rate Pasien Diabetes
 
-Project ini mengambil **pilihan 1** dari deskripsi tugas:
+Dataset yang digunakan:
 
-> Mentransformasi semua data studi kasus Rumah Sakit Sehat Selalu ke dalam format OpenSearch, lalu membuat QA module di atas OpenSearch.
+- `diabetic_data.csv`
+- `IDS_mapping.csv`
 
-Data rumah sakit dibuat dalam format JSON, dimasukkan ke beberapa index OpenSearch, lalu setiap dokumen diberi vector embedding agar bisa dicari menggunakan semantic search / k-NN. Hasil pencarian dari OpenSearch dipakai sebagai konteks untuk LLM dalam menjawab pertanyaan pengguna.
+Sumber dataset: **Diabetes 130-US Hospitals for Years 1999-2008** dari UCI Machine Learning Repository.
+
+## Konsep Sistem
+
+Data pasien diabetes di-index ke OpenSearch dengan konsep:
+
+```text
+1 encounter = 1 document
+```
+
+Index utama:
+
+```text
+diabetes_encounters
+```
+
+Setiap dokumen berisi data encounter pasien, field turunan, dan embedding vector dari `patient_summary_text`.
+
+Field penting:
+
+- `age`
+- `gender`
+- `admission_type`
+- `discharge_disposition`
+- `diagnosis_group`
+- `number_inpatient`
+- `number_outpatient`
+- `number_emergency`
+- `change`
+- `diabetesMed`
+- `readmission_status`
+- `high_risk_flag`
+- `patient_summary_text`
+- `embedding`
+
+Field turunan:
+
+- `readmission_status`: nilai `<30`, `>30`, atau `NO`
+- `readmitted_binary`: true jika `<30` atau `>30`
+- `early_readmission_flag`: true jika `<30`
+- `high_risk_flag`: flag risiko berdasarkan readmission cepat, riwayat inpatient/emergency, lama rawat, dan jumlah obat
+- `diagnosis_group`: pengelompokan diagnosis dari kode ICD
+- `patient_summary_text`: teks ringkasan pasien yang dipakai untuk embedding
 
 ## Fitur
 
-- Generate data dummy Rumah Sakit Sehat Selalu.
-- Load data ke OpenSearch dalam bentuk index terpisah.
-- Menyimpan embedding vector di setiap dokumen.
-- Retrieval menggunakan k-NN vector search OpenSearch.
-- QA/RAG menggunakan model LLM melalui API DeepInfra yang kompatibel dengan OpenAI SDK.
-- GUI berbasis Gradio.
-- Bisa dijalankan lokal atau dengan Docker Compose.
+- Load dataset diabetes ke OpenSearch.
+- Decode ID admission/discharge/source menggunakan `IDS_mapping.csv`.
+- Membuat field turunan untuk analisis readmission.
+- Menyimpan embedding vector untuk semantic search.
+- QA chatbot berbasis Gradio.
+- Retrieval dokumen pasien relevan dari OpenSearch.
+- Agregasi statistik OpenSearch untuk readmission rate, diagnosis group, age group, medication, medical specialty, dan high risk flag.
+- Ringkasan jawaban menggunakan LLM melalui API DeepInfra/OpenAI-compatible.
 
 ## Struktur File
 
 | File | Fungsi |
 | --- | --- |
-| `generate_hospital_data.py` | Membuat data dummy rumah sakit ke `hospital_data.json`. |
-| `hospital_data.json` | Data mentah rumah sakit. |
-| `load_to_opensearch_with_embedding.py` | Membuat index, membuat embedding, dan memasukkan data ke OpenSearch. |
+| `diabetic_data.csv` | Dataset utama diabetes readmission. |
+| `IDS_mapping.csv` | Mapping ID admission type, discharge disposition, dan admission source. |
+| `load_to_opensearch_with_embedding.py` | Membuat index `diabetes_encounters`, preprocessing data, membuat embedding, dan load data ke OpenSearch. |
 | `export_opensearch.py` | Mengekspor index OpenSearch ke `opensearch_dump.json`. |
-| `opensearch_dump.json` | Dump data OpenSearch yang sudah berisi embedding. |
-| `import_to_opensearch.py` | Mengimpor dump ke OpenSearch. Dipakai saat Docker startup. |
+| `import_to_opensearch.py` | Mengimpor dump OpenSearch saat aplikasi dijalankan via Docker/deployment. |
 | `rag_app.py` | Aplikasi QA/RAG dan GUI Gradio. |
-| `Dockerfile` | Image Docker untuk aplikasi Gradio. |
-| `docker-compose.yml` | Menjalankan OpenSearch dan aplikasi sekaligus. |
+| `docker-compose.yml` | Menjalankan OpenSearch dan aplikasi secara lokal. |
 | `.env.example` | Contoh konfigurasi environment. |
-
-## Data yang Digunakan
-
-Dataset dummy berisi:
-
-- 10 departments
-- 20 medical teams
-- 80 doctors
-- 500 patients
-- 1000 patient treatments
-- 1000 billings
-- 2999 billing items
-
-Total data: 5609 records.
 
 ## Environment Variable
 
-Buat file `.env` dari contoh:
+Buat file `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-Lalu isi nilai berikut:
+Isi konfigurasi:
 
 ```env
 DEEPINFRA_API_TOKEN=isi_token_deepinfra_anda
 DEEPINFRA_API_URL=https://api.deepinfra.com/v1/openai
 EMBEDDING_MODEL=google/embeddinggemma-300m
-MODEL=meta-llama/Meta-Llama-3.1-8B-Instruct
+MODEL=google/gemma-3-12b-it
 
 OPENSEARCH_HOST=localhost
 OPENSEARCH_PORT=9200
@@ -72,88 +100,40 @@ OPENSEARCH_PASSWORD=YourStrongPassword123!
 OPENSEARCH_USE_SSL=true
 
 PORT=7860
+
+DIABETES_DATA_PATH=diabetic_data.csv
+DIABETES_MAPPING_PATH=IDS_mapping.csv
+DIABETES_LOAD_LIMIT=0
+BULK_CHUNK_SIZE=250
 ```
 
 Catatan:
 
-- Jangan commit file `.env`.
-- Pastikan `EMBEDDING_MODEL` menghasilkan dimensi vector yang sama dengan `VECTOR_DIM` di script, yaitu `768`.
+- `DIABETES_LOAD_LIMIT=0` berarti memproses seluruh dataset.
+- Untuk testing awal, gunakan nilai kecil seperti `DIABETES_LOAD_LIMIT=5000`.
+- Pastikan model embedding menghasilkan vector berdimensi `768`.
 
-## Cara Menjalankan dengan Docker
+## Step-by-Step Menjalankan Lokal
 
-Cara ini paling praktis untuk demo karena OpenSearch dan aplikasi dijalankan bersama.
-
-### 1. Siapkan `.env`
-
-```bash
-cp .env.example .env
-```
-
-Isi `DEEPINFRA_API_TOKEN`, `DEEPINFRA_API_URL`, `EMBEDDING_MODEL`, dan `MODEL`.
-
-### 2. Jalankan service
-
-```bash
-docker compose up --build
-```
-
-Docker Compose akan menjalankan:
-
-- OpenSearch di `https://localhost:9200`
-- Aplikasi Gradio di `http://localhost:7860`
-
-Saat container aplikasi berjalan, `start.sh` akan menjalankan:
-
-```bash
-python import_to_opensearch.py
-python rag_app.py
-```
-
-Script import akan memasukkan data dari `opensearch_dump.json` ke OpenSearch jika index belum berisi data.
-
-### 3. Buka aplikasi
-
-Buka browser:
-
-```text
-http://localhost:7860
-```
-
-### 4. Menghentikan service
-
-```bash
-docker compose down
-```
-
-Jika ingin menghapus data OpenSearch juga:
-
-```bash
-docker compose down -v
-```
-
-## Cara Menjalankan Lokal
-
-Cara lokal cocok jika ingin debugging script Python satu per satu. OpenSearch tetap paling mudah dijalankan via Docker.
-
-### 1. Jalankan OpenSearch saja
+### 1. Jalankan OpenSearch
 
 ```bash
 docker compose up opensearch
 ```
 
-Tunggu sampai OpenSearch siap di:
+OpenSearch tersedia di:
 
 ```text
 https://localhost:9200
 ```
 
-Default user/password:
+Username/password:
 
 ```text
 admin / YourStrongPassword123!
 ```
 
-### 2. Buat virtual environment
+### 2. Install dependency Python
 
 Windows PowerShell:
 
@@ -163,39 +143,51 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-macOS/Linux:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
 ### 3. Siapkan `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Isi API token dan model.
+Isi API key DeepInfra dan model yang digunakan.
 
-### 4. Import data ke OpenSearch
+### 4. Load data diabetes ke OpenSearch
 
-Cara cepat, gunakan dump yang sudah ada:
+Untuk testing awal:
 
 ```bash
-python import_to_opensearch.py
+$env:DIABETES_LOAD_LIMIT="5000"
+python load_to_opensearch_with_embedding.py
 ```
 
-Alternatif jika ingin membuat data dan embedding dari awal:
+Untuk seluruh dataset:
 
 ```bash
-python generate_hospital_data.py
+$env:DIABETES_LOAD_LIMIT="0"
 python load_to_opensearch_with_embedding.py
+```
+
+Script ini akan membuat index:
+
+```text
+diabetes_encounters
+```
+
+### 5. Export dump OpenSearch
+
+```bash
 python export_opensearch.py
 ```
 
-### 5. Jalankan aplikasi
+Hasilnya:
+
+```text
+opensearch_dump.json
+```
+
+File dump ini dibutuhkan untuk Docker/deployment agar data bisa di-import otomatis.
+
+### 6. Jalankan QA app
 
 ```bash
 python rag_app.py
@@ -207,27 +199,63 @@ Buka:
 http://localhost:7860
 ```
 
-## Alur Sistem
+## Menjalankan dengan Docker Compose
 
-1. User mengetik pertanyaan di GUI Gradio.
-2. Pertanyaan diubah menjadi embedding.
-3. Aplikasi mencari dokumen relevan ke beberapa index OpenSearch:
-   - `departments`
-   - `medical_teams`
-   - `doctors`
-   - `patients`
-   - `patient_treatments`
-   - `billings`
-   - `billing_items`
-4. OpenSearch mengembalikan dokumen dengan skor relevansi tertinggi.
-5. Dokumen hasil retrieval disusun menjadi konteks.
-6. LLM menjawab pertanyaan berdasarkan konteks tersebut.
-7. GUI menampilkan jawaban dan konteks yang dipakai.
+Setelah `opensearch_dump.json` sudah dibuat dari dataset diabetes:
+
+```bash
+docker compose up --build
+```
+
+Docker akan menjalankan:
+
+- OpenSearch
+- Import data dari `opensearch_dump.json`
+- QA app Gradio
+
+Aplikasi tersedia di:
+
+```text
+http://localhost:7860
+```
 
 ## Contoh Pertanyaan
 
-- Siapa saja pasien yang termasuk kategori BPJS?
-- Dokter siapa yang bekerja di departemen Anak?
-- Berapa total biaya tagihan yang belum lunas?
-- Pasien siapa yang menjalani operasi oleh Tim Jantung?
-- Item tagihan apa saja yang ditanggung asuransi?
+```text
+Berapa distribusi pasien berdasarkan status readmission?
+```
+
+```text
+Berapa readmission rate keseluruhan?
+```
+
+```text
+Diagnosis group apa yang paling banyak mengalami readmission kurang dari 30 hari?
+```
+
+```text
+Kelompok umur mana yang paling sering mengalami readmission <30?
+```
+
+```text
+Apakah pasien dengan diabetesMed Yes lebih sering mengalami readmission?
+```
+
+```text
+Tampilkan contoh pasien high risk untuk readmission.
+```
+
+```text
+Medical specialty apa yang memiliki early readmission paling banyak?
+```
+
+## Catatan Penting
+
+`opensearch_dump.json` lama dari project rumah sakit dummy tidak cocok untuk versi diabetes ini. Setelah mengganti dataset, jalankan:
+
+```bash
+python load_to_opensearch_with_embedding.py
+python export_opensearch.py
+```
+
+agar dump berisi index `diabetes_encounters`.

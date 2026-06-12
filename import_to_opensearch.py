@@ -1,30 +1,24 @@
 """
-Import opensearch_dump.json ke OpenSearch.
-Dijalankan otomatis oleh start.sh saat container pertama kali startup.
+Import opensearch_dump.json ke OpenSearch untuk kasus Diabetes Readmission.
+Dijalankan otomatis oleh Dockerfile sebelum rag_app.py.
 
-Usage: python import_to_opensearch.py
+Usage:
+    python import_to_opensearch.py
 """
 
 import json
 import os
 import time
+
 from opensearchpy import OpenSearch, helpers
 
-INDICES = [
-    "departments",
-    "medical_teams",
-    "doctors",
-    "patients",
-    "patient_treatments",
-    "billings",
-    "billing_items",
-]
+INDICES = ["diabetes_encounters"]
 
 os_host = os.getenv("OPENSEARCH_HOST", "localhost")
 os_port = int(os.getenv("OPENSEARCH_PORT", "9200"))
 os_user = os.getenv("OPENSEARCH_USER", "admin")
 os_pass = os.getenv("OPENSEARCH_PASSWORD", "YourStrongPassword123!")
-os_ssl  = os.getenv("OPENSEARCH_USE_SSL", "true").lower() == "true"
+os_ssl = os.getenv("OPENSEARCH_USE_SSL", "true").lower() == "true"
 
 
 def make_client() -> OpenSearch:
@@ -38,7 +32,6 @@ def make_client() -> OpenSearch:
     )
 
 
-# Tunggu OpenSearch siap (max 5 menit)
 print("Menunggu OpenSearch siap...", flush=True)
 client = None
 for attempt in range(60):
@@ -52,28 +45,28 @@ for attempt in range(60):
         time.sleep(5)
 
 if client is None:
-    print("OpenSearch tidak dapat dijangkau setelah 5 menit. Abort.")
-    raise SystemExit(1)
+    raise SystemExit("OpenSearch tidak dapat dijangkau setelah 5 menit. Abort.")
 
-# Cek apakah data sudah ada (idempoten)
-if client.indices.exists(index="departments"):
-    count = client.count(index="departments")["count"]
+if client.indices.exists(index="diabetes_encounters"):
+    count = client.count(index="diabetes_encounters")["count"]
     if count > 0:
-        print(f"Data sudah ada ({count} dokumen di 'departments'). Skip import.")
+        print(f"Data sudah ada ({count} dokumen di 'diabetes_encounters'). Skip import.")
         raise SystemExit(0)
 
-# Baca dump
 dump_path = os.getenv("DUMP_PATH", "opensearch_dump.json")
 print(f"Membaca {dump_path}...", flush=True)
 with open(dump_path, "r", encoding="utf-8") as f:
     dump = json.load(f)
 
-# Import tiap indeks
-for index in INDICES:
-    if index not in dump["indices"]:
-        print(f"  {index}: tidak ada di dump, skip")
-        continue
+missing = [index for index in INDICES if index not in dump.get("indices", {})]
+if missing:
+    raise SystemExit(
+        "Dump OpenSearch belum berisi index diabetes. "
+        "Jalankan load_to_opensearch_with_embedding.py lalu export_opensearch.py. "
+        f"Index hilang: {', '.join(missing)}"
+    )
 
+for index in INDICES:
     entry = dump["indices"][index]
 
     if client.indices.exists(index=index):
@@ -93,7 +86,6 @@ for index in INDICES:
     if errors:
         print(f"    {len(errors)} error: {errors[:2]}")
 
-# Verifikasi
 print("\nVerifikasi:")
 for index in INDICES:
     count = client.count(index=index)["count"]
